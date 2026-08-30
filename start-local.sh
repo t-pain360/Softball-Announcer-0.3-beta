@@ -59,6 +59,40 @@ except Exception:
 PY
 )"
 
+# NeuTTS Air is a voice-cloning model and requires a reference WAV plus its
+# transcript. Seed the upstream Jo reference on first run so a fresh local
+# checkout works immediately. Once downloaded, synthesis itself is local.
+VOICE_DIR="$ROOT/voices"
+mkdir -p "$VOICE_DIR"
+if [ ! -s "$VOICE_DIR/jo.wav" ] || [ ! -s "$VOICE_DIR/jo.txt" ]; then
+  echo "Installing the default NeuTTS reference voice (one-time)..."
+  "$PYTHON" - <<'PY'
+from pathlib import Path
+from urllib.request import urlopen
+
+root = Path("voices")
+root.mkdir(exist_ok=True)
+files = {
+    "jo.wav": "https://raw.githubusercontent.com/neuphonic/neutts/main/samples/jo.wav",
+    "jo.txt": "https://raw.githubusercontent.com/neuphonic/neutts/main/samples/jo.txt",
+}
+for name, url in files.items():
+    target = root / name
+    if target.is_file() and target.stat().st_size > 0:
+        continue
+    print(f"  downloading {name}...")
+    with urlopen(url, timeout=60) as response:
+        target.write_bytes(response.read())
+PY
+fi
+
+# Keep the existing UI voice name "classic", but use the seeded Jo reference
+# until the user supplies a dedicated announcer recording as classic.wav/txt.
+if [ ! -s "$VOICE_DIR/classic.wav" ] || [ ! -s "$VOICE_DIR/classic.txt" ]; then
+  cp "$VOICE_DIR/jo.wav" "$VOICE_DIR/classic.wav"
+  cp "$VOICE_DIR/jo.txt" "$VOICE_DIR/classic.txt"
+fi
+
 export NEUTTS_PYTHON="$PYTHON"
 export NODE_ENV="${NODE_ENV:-development}"
 
@@ -67,6 +101,7 @@ echo "🥎 Softball Announcer — Local Version"
 echo "   No OpenAI or Gemini API key required."
 echo "   TTS: NeuTTS Air (local)"
 echo "   NeuTTS backbone: $NEUTTS_BACKBONE"
+echo "   NeuTTS reference: $VOICE_DIR/classic.wav"
 echo "   Node: $(node --version)"
 echo "   Python: $("$PYTHON" --version 2>&1)"
 echo ""
