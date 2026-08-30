@@ -1,147 +1,187 @@
-# 🥎 Softball Announcer 0.3 Beta
+# 🥎 Softball Announcer — Local Version
 
-A lightweight, browser-based softball/baseball public-address announcer that turns player information into short stadium announcements and optional generated speech.
+A fully local softball/baseball public-address announcer for game-day use. Player data, announcement generation, and speech stay on the local machine. **No OpenAI API key, Gemini key, cloud TTS service, or Vercel deployment is required.**
 
-**Repository:** https://github.com/t-pain360/Softball-Announcer-0.3-beta
+> **Status:** 0.3 local beta — active development.
 
-> **Status:** 0.3 beta — active development. APIs and UI behavior may change.
+## What changed from 0.3 Beta
 
-## ✨ What It Does
+The local version removes the cloud AI dependency:
 
-Softball Announcer is designed for dugouts, scorekeepers, team DJs, and anyone who wants a more energetic ballpark presentation without needing a dedicated PA operator.
+- Removed the OpenAI Node SDK.
+- Removed `OPENAI_API_KEY` and cloud model configuration.
+- Announcement scripts are generated deterministically from local templates.
+- **Piper TTS** is the preferred open-source local speech engine.
+- If Piper is not configured, the browser's local `SpeechSynthesis` API is used as a fallback.
+- Audio and scripts are cached only in the running server's memory.
+- Vercel configuration has been removed because Piper requires a local runtime/model.
 
-Give the app a player and an announcer persona and it can:
-
-- Generate a short PA-style announcement.
-- Include the player's name and jersey number.
-- Add an optional nickname or hype/lore cue.
-- Generate spoken audio through the configured OpenAI models.
-- Cache generated announcements in server memory for fast replay.
-- Pre-cache up to 15 players for a selected announcer persona.
-- Fall back to deterministic local announcement text when OpenAI script generation is unavailable.
-- Run locally with a simple Node/TypeScript server or deploy through Vercel.
-
-## 🎙️ Announcer Personas
-
-| Persona | Voice | Style |
-|---|---|---|
-| **Classic PA** | `onyx` | Authoritative, warm, deliberate stadium PA |
-| **Hype Crew** | `alloy` | High-energy, modern ballpark MC |
-| **Golden Age Radio** | `echo` | Crisp vintage baseball-radio style |
-| **Velvet PA** | `shimmer` | Smooth, confident, polished with dramatic pauses |
-
-The persona definitions live in the server and control both the writing style and selected speech voice.
-
-## 🧱 Architecture
+## Architecture
 
 ```text
 ┌──────────────────────────────┐
 │        Browser / React       │
-│   Player + Persona Controls  │
+│   Lineup + Persona Controls  │
 └──────────────┬───────────────┘
                │ HTTP / JSON
                ▼
 ┌──────────────────────────────┐
-│      Express + TypeScript    │
+│      Local Express Server    │
 │          server.ts           │
 ├──────────────────────────────┤
-│  Player validation            │
-│  Persona selection            │
-│  Announcement cache           │
-│  Script generation            │
-│  Speech generation            │
+│ Local announcement templates │
+│ Persona selection             │
+│ In-memory cache               │
+│ Piper process launcher        │
 └──────────────┬───────────────┘
-               │
+               │ local process
                ▼
 ┌──────────────────────────────┐
-│          OpenAI API           │
-│                              │
-│  Responses API → PA script   │
-│  Audio Speech API → MP3      │
+│        Piper TTS              │
+│      Open-source / local      │
+│         WAV output            │
 └──────────────────────────────┘
+
+Fallback:
+Browser SpeechSynthesis → local OS/browser voice
 ```
 
-The current beta keeps the OpenAI client on the server. The browser does **not** need to contain the API key. The server reads `OPENAI_API_KEY` from the environment and initializes the OpenAI SDK only when a key is present.
+There are **no outbound AI requests** in the application code.
 
-## 🔐 API Key & Security
+## 🎙️ Announcer Personas
 
-Set the OpenAI API key as a **server-side environment variable**:
+| Persona | Local style |
+|---|---|
+| **Classic PA** | Authoritative, warm, deliberate stadium PA |
+| **Hype Crew** | High-energy, modern ballpark MC |
+| **Golden Age Radio** | Crisp vintage baseball-radio style |
+| **Velvet PA** | Smooth, confident, polished with dramatic pauses |
+
+Personas currently control the local announcement template and browser-speech pacing. Piper uses the configured local model.
+
+## 🔊 Piper TTS
+
+[Piper](https://github.com/rhasspy/piper) is the preferred TTS engine for this version. Piper runs locally and produces speech without sending the announcement to a cloud speech provider.
+
+### Install Piper
+
+The easiest Python-based installation is:
+
+```bash
+python3 -m pip install piper-tts
+```
+
+Verify it is available:
+
+```bash
+piper --help
+```
+
+Download a Piper voice/model using the Piper tooling appropriate to your installation. Store the model somewhere on the local machine, for example:
+
+```text
+/home/timw1982/Softball/models/en_US-lessac-medium.onnx
+```
+
+Then configure the model path in `.env`:
 
 ```env
-OPENAI_API_KEY=your_api_key_here
+PIPER_MODEL=/home/timw1982/Softball/models/en_US-lessac-medium.onnx
 ```
 
-Optional model overrides:
+If `piper` is not on your `PATH`, set its executable explicitly:
 
 ```env
-OPENAI_TEXT_MODEL=gpt-4o-mini
-OPENAI_TTS_MODEL=gpt-4o-mini-tts
+PIPER_BIN=/home/timw1982/.local/bin/piper
 ```
 
-Never commit `.env` or an API key to GitHub.
+Optional timeout:
 
-The `/api/health` endpoint intentionally reports only whether OpenAI is configured; it does not return the key itself.
+```env
+PIPER_TIMEOUT_MS=30000
+```
 
-For a public production deployment, add authentication, rate limiting, request-size controls, and abuse protection before exposing the announcement endpoints broadly.
+### No model? No problem
 
-## 🔊 Audio Pipeline
+If `PIPER_MODEL` is not configured, the app still works. It returns the locally generated announcement text and the browser uses `SpeechSynthesis` to speak it.
 
-The normal announcement pipeline is:
+## 🚀 Local Development
 
-1. The client sends player data and a persona ID to `POST /api/announce`.
-2. The server validates the player and persona.
-3. The server checks its in-memory cache.
-4. If no cached script exists, OpenAI generates a short spoken announcement.
-5. The server sends that text to the configured OpenAI speech model.
-6. The returned MP3 is converted to Base64.
-7. The server caches the result and returns the script/audio to the client.
+### Requirements
 
-If text generation fails, the server uses a local deterministic fallback script. If speech generation is unavailable, the request reports the speech-generation error rather than silently pretending audio was produced.
+- Node.js 18+ recommended
+- npm
+- Python 3 if using Piper
+- Piper and a compatible local voice model for open-source TTS
 
-## 🧠 Announcement Rules
+### Install
 
-The generated prompt is intentionally constrained so announcements:
+```bash
+npm install
+```
 
-- Stay short — normally 1–2 sentences.
-- Include the player's name and jersey number.
-- Do not invent statistics.
-- Do not invent game situations.
-- Do not invent positions or achievements.
-- Use only the supplied nickname and hype/lore information.
-- Return only spoken announcement text.
+### Configure Piper
 
-## ⚡ Caching
+Create `.env` in the project root:
 
-Announcements are cached in server memory using player/persona information as the cache key.
+```env
+PIPER_MODEL=/absolute/path/to/your/voice.onnx
+```
 
-The cache can avoid regenerating the same script/audio repeatedly during a game. It is intentionally an in-memory cache, so it is cleared when the server instance restarts.
+Optional:
 
-For multi-instance production deployments, consider moving the cache to a shared store such as Redis or another persistent caching service.
+```env
+PORT=3000
+PIPER_BIN=piper
+PIPER_TIMEOUT_MS=30000
+```
 
-## 📡 API
+**There is no `OPENAI_API_KEY` setting.**
+
+### Start
+
+```bash
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+### Production-style local run
+
+```bash
+npm run build
+npm start
+```
+
+The production server serves the Vite `dist` directory.
+
+## 📡 Local API
 
 ### `GET /api/health`
 
-Returns basic server health and whether an OpenAI key is configured.
-
-Example:
+Returns local-runtime information:
 
 ```json
 {
   "ok": true,
-  "openaiConfigured": true
+  "localOnly": true,
+  "cloudAI": false,
+  "tts": "piper",
+  "piperModelConfigured": true
 }
 ```
 
 ### `GET /api/personas`
 
-Returns the available announcer personas.
+Returns the four local announcer personas.
 
 ### `POST /api/announce`
 
-Generate an announcement and optional audio.
-
-Example request:
+Generates a local announcement and, when Piper is configured, local WAV audio.
 
 ```json
 {
@@ -157,163 +197,155 @@ Example request:
 }
 ```
 
-Example response shape:
+A Piper response contains Base64-encoded WAV audio:
 
 ```json
 {
-  "text": "Your attention please... Now batting... number 14, Jordan Smith, J-Smooth!",
+  "text": "Your attention please... Now batting... number 14, Jordan Smith, J-Smooth.",
   "audioBase64": "...",
-  "voice": "onyx",
+  "audioType": "piper_wav",
+  "voice": "/path/to/voice.onnx",
   "audioAvailable": true
 }
 ```
 
-### `POST /api/precache`
-
-Pre-generates announcements for a lineup. The current server limits the request to 15 players.
+When Piper is unavailable:
 
 ```json
 {
-  "players": [
-    { "name": "Jordan Smith", "number": 14 },
-    { "name": "Taylor Jones", "number": 7 }
-  ],
-  "personaId": "classic"
+  "text": "...",
+  "audioType": "browser_speech",
+  "voice": "browser-local",
+  "audioAvailable": false
 }
 ```
 
+The browser then speaks the returned text locally.
+
+### `POST /api/precache`
+
+Pre-generates local announcements for up to 15 players. Piper audio is cached in memory for rapid replay during a game.
+
+## 🧠 Local Announcement Rules
+
+The local generator intentionally avoids an LLM so it cannot invent player statistics or game facts.
+
+Announcements:
+
+- Include the player's name and jersey number.
+- May include the supplied nickname.
+- May include the supplied hype/lore cue.
+- Are short and PA-friendly.
+- Do not invent statistics, positions, achievements, scores, innings, or game situations.
+
+## 🔐 Privacy & Security
+
+This version is designed for local/offline operation.
+
+- No AI API keys are required.
+- No OpenAI credentials are stored or transmitted.
+- No Gemini credentials are stored or transmitted.
+- Player information stays on the local machine unless you deliberately expose the server yourself.
+- Piper speech generation happens as a local child process.
+- The cache exists only in server memory and disappears when the server stops.
+
+For a game-day computer, bind the application to localhost if remote access is not required.
+
+## ⚡ Game-Day Workflow
+
+1. Install Node and Piper.
+2. Download a Piper voice model.
+3. Set `PIPER_MODEL` in `.env`.
+4. Run `npm install`.
+5. Run `npm run dev`.
+6. Open `http://localhost:3000`.
+7. Enter the lineup.
+8. Select an announcer persona.
+9. Press **PRE-CACHE LINEUP** before the game.
+10. Announce each batter from the booth.
+
+Pre-caching is recommended because it gives the local machine time to generate the WAV files before they are needed.
+
 ## 🛠️ Tech Stack
 
-- **React** — browser UI
-- **TypeScript** — application/server language
-- **Vite** — frontend build tooling
-- **Express** — HTTP API/server
-- **OpenAI Node SDK** — text and speech generation
-- **Lucide React** — UI icons
-- **Vercel** — supported deployment target
+- React
+- TypeScript
+- Vite
+- Express
+- Piper TTS
+- Browser SpeechSynthesis fallback
+- Lucide React
 
-The repository is configured as an ES module project and provides `dev`, `build`, and `start` scripts through `package.json`.
+There is intentionally **no OpenAI SDK or other cloud AI SDK** in this local version.
 
-## 🚀 Local Development
-
-### Requirements
-
-- Node.js 18+ recommended
-- npm
-- An OpenAI API key for generated speech
-
-### Install
-
-```bash
-npm install
-```
-
-### Configure environment
-
-Create `.env` in the project root:
-
-```env
-OPENAI_API_KEY=your_api_key_here
-```
-
-Optional:
-
-```env
-PORT=3000
-OPENAI_TEXT_MODEL=gpt-4o-mini
-OPENAI_TTS_MODEL=gpt-4o-mini-tts
-```
-
-### Start development server
-
-```bash
-npm run dev
-```
-
-Then open:
+## 📁 Project Structure
 
 ```text
-http://localhost:3000
+.
+├── .github/          # GitHub configuration/workflows
+├── api/               # Legacy deployment files from the upstream project
+├── src/               # React application
+├── index.html         # Vite entry point
+├── server.ts          # Local Express API + Piper integration
+├── package.json       # Local dependencies/scripts
+└── tsconfig.json      # TypeScript configuration
 ```
 
-### Production build
+## 🧪 Troubleshooting
+
+### `OPENAI_API_KEY is not configured`
+
+That message belongs to the cloud 0.3 beta. The local branch does not require or use OpenAI. Make sure you are running the `local-version` branch.
+
+### Piper is unavailable
+
+Check:
+
+```bash
+which piper
+piper --help
+```
+
+Then check:
+
+```bash
+echo "$PIPER_MODEL"
+ls -lh "$PIPER_MODEL"
+```
+
+If the model is not configured, the application will use browser-local SpeechSynthesis instead.
+
+### `dist/index.html` does not exist
+
+Build the frontend before starting in production mode:
 
 ```bash
 npm run build
 npm start
 ```
 
-The build runs TypeScript validation followed by the Vite production build.
+For development, use:
 
-## ☁️ Vercel Deployment
-
-The repository includes `vercel.json` and routes `/api/*` requests to `/api/index.ts` while serving the Vite `dist` output.
-
-Configure the following environment variable in the Vercel project:
-
-```text
-OPENAI_API_KEY
+```bash
+npm run dev
 ```
 
-Optional model variables:
+## 🗺️ Roadmap
 
-```text
-OPENAI_TEXT_MODEL
-OPENAI_TTS_MODEL
-```
-
-Then deploy the repository through Vercel or your preferred CI/CD workflow.
-
-> **Deployment note:** The repository currently contains both a traditional Express server entry point and Vercel API routing configuration. Verify the Vercel API entry point and production build locally before treating a deployment as production-ready.
-
-## 📁 Project Structure
-
-```text
-.
-├── .github/              # GitHub configuration/workflows
-├── api/                  # Vercel API entry point(s)
-├── src/                  # React application source
-├── index.html            # Vite HTML entry
-├── server.ts             # Express API + server entry
-├── package.json          # Dependencies and scripts
-├── tsconfig.json         # TypeScript configuration
-└── vercel.json           # Vercel deployment configuration
-```
-
-## 🧪 Development Checklist
-
-Before a game-day deployment:
-
-- [ ] `npm install` completes successfully.
-- [ ] `npm run build` passes.
-- [ ] `OPENAI_API_KEY` is configured server-side.
-- [ ] `/api/health` reports the expected configuration state.
-- [ ] Each announcer persona produces usable audio.
-- [ ] Player names and numbers are correct.
-- [ ] Pre-cache completes for the intended lineup.
-- [ ] Audio playback works through the venue's speakers.
-- [ ] API rate limits and authentication are configured for public deployments.
-
-## 🗺️ Roadmap Ideas
-
-- Fully open-source/local TTS option such as Piper.
-- Optional local LLM for completely offline script generation.
-- Persistent/shared audio cache.
-- Team and lineup import/export.
-- Better audio mixing with walk-up music and PA effects.
-- Adjustable speech speed, pitch, and stadium reverb.
-- Game-day operator mode with keyboard shortcuts.
-- Authentication and team-level access control.
-- PWA/offline support for field use.
-
-## 🤝 Contributing
-
-Issues, suggestions, and pull requests are welcome. When submitting a change, include enough detail to reproduce the behavior and, where practical, test the affected API or UI flow locally.
+- Add downloadable/managed Piper voice setup.
+- Add multiple Piper voice profiles per persona.
+- Add adjustable pitch and speaking rate.
+- Add offline lineup save/load.
+- Add keyboard shortcuts for game-day operation.
+- Add local audio effects and walk-up music.
+- Add a local mixer for PA volume and ducking.
+- Package the application as a desktop app for Windows/Linux.
+- Add a fully offline installer containing Node, Piper, and selected voice models.
 
 ## 📄 License
 
-No license file is currently specified in the repository. Until a license is added, assume the project is **all rights reserved** and do not redistribute it as open-source software without permission from the copyright holder.
+No license file is currently specified in the upstream repository. Until a license is added, assume the project is **all rights reserved**.
 
-## 🥎 About
+## 🥎 Local Edition
 
-**Softball Announcer 0.3 Beta** is a game-day PA assistant for softball and baseball that combines player-specific announcements, announcer personas, generated speech, and lineup pre-caching in a simple web application.
+**Softball Announcer — Local Version** is intended to be a dependable game-day PA tool that keeps the entire announcement pipeline on the operator's computer: local player data → local announcement logic → local Piper speech → local speakers.
