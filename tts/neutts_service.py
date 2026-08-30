@@ -13,6 +13,7 @@ PORT = int(os.getenv("NEUTTS_PORT", "8011"))
 REFERENCE_DIR = Path(os.getenv("NEUTTS_REFERENCE_DIR", "voices"))
 BACKBONE = os.getenv("NEUTTS_BACKBONE", "neuphonic/neutts-air-q4-gguf")
 CODEC = os.getenv("NEUTTS_CODEC", "neuphonic/neucodec")
+LANGUAGE = os.getenv("NEUTTS_LANGUAGE", "en-us")
 BACKBONE_DEVICE = os.getenv("NEUTTS_BACKBONE_DEVICE", "cpu")
 CODEC_DEVICE = os.getenv("NEUTTS_CODEC_DEVICE", "cpu")
 
@@ -40,6 +41,7 @@ tts = NeuTTSAir(
     backbone_device=BACKBONE_DEVICE,
     codec_repo=CODEC,
     codec_device=CODEC_DEVICE,
+    language=LANGUAGE,
 )
 
 class SynthesisRequest(BaseModel):
@@ -67,7 +69,7 @@ def reference_codes(voice: str):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "engine": "neutts-air", "backbone": BACKBONE}
+    return {"ok": True, "engine": "neutts-air", "backbone": BACKBONE, "language": LANGUAGE}
 
 
 @app.post("/synthesize")
