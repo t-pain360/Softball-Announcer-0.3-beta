@@ -1,0 +1,9 @@
+{
+  "name": "baseball-announcer-0.3-beta",
+  "private": true,
+  "version": "0.3.0-beta.1",
+  "type": "module",
+  "scripts": { "dev": "tsx server.ts", "build": "tsc --noEmit && vite build", "start": "tsx server.ts" },
+  "dependencies": { "dotenv": "latest", "express": "latest", "openai": "latest", "react": "latest", "react-dom": "latest", "vite": "latest", "@vitejs/plugin-react": "latest", "lucide-react": "latest" },
+  "devDependencies": { "@types/express": "latest", "@types/node": "latest", "@types/react": "latest", "@types/react-dom": "latest", "tsx": "latest", "typescript": "latest" }
+}
