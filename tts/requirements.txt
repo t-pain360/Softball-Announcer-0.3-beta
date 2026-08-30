@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+soundfile
+neutts-air @ git+https://github.com/neuphonic/neutts-air.git
+llama-cpp-python
+onnxruntime
