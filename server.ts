@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { createServer as createViteServer } from 'vite';
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
@@ -119,8 +120,23 @@ app.post('/api/precache', async (req, res) => {
   return res.json({ completed, total: players.length, complete: completed === players.length });
 });
 
-const dist = path.join(__dirname, 'dist');
-app.use(express.static(dist));
-app.use((_req, res) => res.sendFile(path.join(dist, 'index.html')));
+async function startServer() {
+  if (process.env.NODE_ENV === 'production') {
+    const dist = path.join(process.cwd(), 'dist');
+    app.use(express.static(dist));
+    app.use((_req, res) => res.sendFile(path.join(dist, 'index.html')));
+    app.listen(port, () => console.log(`Softball Announcer Local Version listening on http://localhost:${port}`));
+    return;
+  }
+
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'spa',
+  });
+  app.use(vite.middlewares);
+  app.listen(port, () => console.log(`Softball Announcer Local Version dev server listening on http://localhost:${port}`));
+}
+
+if (process.env.NODE_ENV !== 'test') void startServer();
+
 export default app;
-if (process.env.NODE_ENV !== 'test') app.listen(port, () => console.log(`Softball Announcer Local Version listening on http://localhost:${port}`));
