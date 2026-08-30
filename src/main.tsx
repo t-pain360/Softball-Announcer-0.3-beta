@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 
 type Player = { id: string; name: string; number: number; nickname?: string; lore?: string };
-type Persona = { id: string; name: string; style: string };
+type Persona = { id: string; name: string; style: string; voice?: string };
 const blank = (i: number): Player => ({ id: crypto.randomUUID(), name: '', number: i + 1, nickname: '', lore: '' });
 
 function speakLocally(text: string, personaId: string) {
@@ -40,7 +40,7 @@ function App() {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Announcement failed');
       setAnnouncement(data.text || '');
-      if (data.audioBase64 && data.audioType === 'piper_wav') {
+      if (data.audioBase64 && data.audioType === 'neutts_wav') {
         const audioUrl = `data:audio/wav;base64,${data.audioBase64}`;
         setAudio(audioUrl);
         const playerAudio = new Audio(audioUrl);
@@ -52,8 +52,7 @@ function App() {
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Announcement failed';
       setAudioError(message);
-      if (announcement) return;
-      setAnnouncement(message);
+      if (!announcement) setAnnouncement(message);
     } finally { setBusy(false); }
   };
 
@@ -71,7 +70,7 @@ function App() {
         <section className="panel"><div className="panelHead"><h3>PLAYER PROFILE</h3></div><label>Nickname<input value={active?.nickname || ''} onChange={e=>update(selected,{nickname:e.target.value})} placeholder="The nickname the crowd knows"/></label><label>Hype cue / lore<textarea value={active?.lore || ''} onChange={e=>update(selected,{lore:e.target.value})} placeholder="A safe, factual cue for the announcer…"/></label><div className="personas"><span className="label">ANNOUNCER PERSONA</span>{personas.map(p=><button key={p.id} className={personaId===p.id?'persona active':'persona'} onClick={()=>setPersonaId(p.id)}><b>{p.name}</b><small>{p.style}</small></button>)}</div></section>
       </div>
       <section className="panel output"><div className="panelHead"><h3>PA OUTPUT</h3>{audio && <audio controls src={audio}/>}</div><div className="script">{announcement || 'Your local announcement will appear here.'}</div>{audioError && <p role="alert">Audio: {audioError}</p>}</section>
-    </main><footer>LOCAL VERSION · NO CLOUD AI · PIPER TTS · BUILT FOR THE BALLPARK</footer>
+    </main><footer>LOCAL VERSION · NO CLOUD AI · NEUTTS AIR · BUILT FOR THE BALLPARK</footer>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
