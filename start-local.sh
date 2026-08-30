@@ -27,17 +27,26 @@ PIP="$ROOT/.venv/bin/pip"
 
 "$PYTHON" -m pip install --upgrade pip >/dev/null
 
-# Current NeuTTS Air is published as the `neutts` Python package. The
-# `neuttsair` module remains the API used by the NeuTTS Air examples.
+# NeuTTS Air currently installs as the `neutts` distribution while exposing
+# the `neuttsair` compatibility module used by the application.
 if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair' >/dev/null 2>&1; then
   echo "Installing NeuTTS Air and local API dependencies..."
   "$PIP" install -r tts/requirements.txt
 fi
 
-if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair' >/dev/null 2>&1; then
+# Some NeuTTS dependency combinations install a newer torchao that no longer
+# exposes the NF4Tensor module expected by the torchtune version pulled in by
+# neucodec. Repair that dependency explicitly before starting the service.
+if ! "$PYTHON" -c 'from torchao.dtypes.nf4tensor import NF4Tensor' >/dev/null 2>&1; then
+  echo "Repairing compatible torchao for NeuTTS..."
+  "$PIP" install --force-reinstall 'torchao>=0.5,<0.7'
+fi
+
+if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair; from torchao.dtypes.nf4tensor import NF4Tensor' >/dev/null 2>&1; then
   echo "ERROR: NeuTTS Air installation could not be verified."
   echo "Python: $PYTHON"
-  echo "Try: $PYTHON -c 'import neuttsair; print(neuttsair.__file__)'"
+  echo "Run this diagnostic:"
+  echo "  $PYTHON -c 'import torch, torchao, neuttsair; print(torch.__version__, torchao.__version__, neuttsair.__file__)'"
   exit 1
 fi
 
