@@ -7,7 +7,10 @@ cd "$ROOT"
 command -v node >/dev/null 2>&1 || { echo "Node.js is required."; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "npm is required."; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "Python 3 is required."; exit 1; }
-command -v git >/dev/null 2>&1 || { echo "Git is required to install NeuTTS Air."; exit 1; }
+command -v espeak-ng >/dev/null 2>&1 || command -v espeak >/dev/null 2>&1 || {
+  echo "eSpeak NG is required by NeuTTS Air. Install it with: sudo apt install espeak-ng"
+  exit 1
+}
 
 if [ ! -d node_modules ]; then
   echo "Installing Node dependencies..."
@@ -21,29 +24,19 @@ fi
 
 PYTHON="$ROOT/.venv/bin/python"
 PIP="$ROOT/.venv/bin/pip"
-NEUTTS_SRC="$ROOT/.local/neutts-air"
 
 "$PYTHON" -m pip install --upgrade pip >/dev/null
 
-# NeuTTS Air is currently distributed from its source repository rather than
-# as a PyPI package named "neutts-air". Clone it locally and install its
-# published Python dependencies into this app's venv.
-if [ ! -f "$NEUTTS_SRC/neuttsair/neutts.py" ]; then
-  echo "Installing NeuTTS Air source..."
-  mkdir -p "$ROOT/.local"
-  rm -rf "$NEUTTS_SRC"
-  git clone --depth 1 https://github.com/Tavus-Engineering/neutts-air.git "$NEUTTS_SRC"
-fi
-
+# Current NeuTTS Air is published as the `neutts` Python package. The
+# `neuttsair` module remains the API used by the NeuTTS Air examples.
 if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair' >/dev/null 2>&1; then
-  echo "Installing NeuTTS Air dependencies..."
-  "$PIP" install -r "$NEUTTS_SRC/requirements.txt"
-  "$PIP" install -e "$NEUTTS_SRC"
-  "$PIP" install fastapi 'uvicorn[standard]' soundfile llama-cpp-python 'onnxruntime>=1.18,<2'
+  echo "Installing NeuTTS Air and local API dependencies..."
+  "$PIP" install -r tts/requirements.txt
 fi
 
 if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair' >/dev/null 2>&1; then
   echo "ERROR: NeuTTS Air installation could not be verified."
+  echo "Python: $PYTHON"
   echo "Try: $PYTHON -c 'import neuttsair; print(neuttsair.__file__)'"
   exit 1
 fi
