@@ -23,10 +23,6 @@ if [ ! -d .venv ]; then
 fi
 
 PYTHON="$ROOT/.venv/bin/python"
-
-# Never use the user's ~/.local Python packages. NeuTTS has a large native
-# dependency tree and mixing user-site packages with the venv causes imports
-# such as neuttsair/torchao to disappear or become incompatible.
 export PYTHONNOUSERSITE=1
 
 "$PYTHON" -m pip install --upgrade pip >/dev/null
@@ -44,8 +40,36 @@ if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair; from torchao.d
   exit 1
 fi
 
+# Resolve an already-downloaded gated Q4 GGUF into a filesystem path. NeuTTS
+# passes a filesystem path directly to llama.cpp, so once the model exists in
+# the Hugging Face cache startup is completely local and does not re-authenticate.
+export NEUTTS_BACKBONE="$($PYTHON - <<'PY'
+from pathlib import Path
+try:
+    from huggingface_hub import try_to_load_from_cache
+    repo = "neuphonic/neutts-air-q4-gguf"
+    filename = "neutts-air-Q4_0.gguf"
+    cached = try_to_load_from_cache(repo_id=repo, filename=filename)
+    if cached and Path(cached).is_file():
+        print(cached)
+    else:
+        print(repo)
+except Exception:
+    print("neuphonic/neutts-air-q4-gguf")
+PY
+)"
+
 export NEUTTS_PYTHON="$PYTHON"
 export NODE_ENV="${NODE_ENV:-development}"
+
+echo ""
+echo "🥎 Softball Announcer — Local Version"
+echo "   No OpenAI or Gemini API key required."
+echo "   TTS: NeuTTS Air (local)"
+echo "   NeuTTS backbone: $NEUTTS_BACKBONE"
+echo "   Node: $(node --version)"
+echo "   Python: $("$PYTHON" --version 2>&1)"
+echo ""
 
 cleanup() {
   if [ -n "${APP_PID:-}" ] && kill -0 "$APP_PID" 2>/dev/null; then
@@ -54,14 +78,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
-
-echo ""
-echo "🥎 Softball Announcer — Local Version"
-echo "   No OpenAI or Gemini API key required."
-echo "   TTS: NeuTTS Air (local)"
-echo "   Node: $(node --version)"
-echo "   Python: $("$PYTHON" --version 2>&1)"
-echo ""
 
 npm run dev &
 APP_PID=$!
