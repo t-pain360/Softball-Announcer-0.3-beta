@@ -16,6 +16,22 @@ CODEC = os.getenv("NEUTTS_CODEC", "neuphonic/neucodec")
 BACKBONE_DEVICE = os.getenv("NEUTTS_BACKBONE_DEVICE", "cpu")
 CODEC_DEVICE = os.getenv("NEUTTS_CODEC_DEVICE", "cpu")
 
+# If the gated Q4 model has already been downloaded, use the local GGUF file
+# directly. NeuTTS/llama.cpp supports a filesystem path and this prevents a
+# startup health check from triggering another Hugging Face request.
+if BACKBONE == "neuphonic/neutts-air-q4-gguf":
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        cached = try_to_load_from_cache(
+            repo_id=BACKBONE,
+            filename="neutts-air-Q4_0.gguf",
+        )
+        if cached and Path(cached).is_file():
+            BACKBONE = cached
+            print(f"Using cached local NeuTTS Air GGUF: {BACKBONE}", flush=True)
+    except Exception as exc:
+        print(f"NeuTTS cache lookup skipped: {exc}", flush=True)
+
 app = FastAPI(title="Softball Announcer NeuTTS Air", docs_url=None, redoc_url=None)
 
 print(f"Loading NeuTTS Air backbone: {BACKBONE}", flush=True)
