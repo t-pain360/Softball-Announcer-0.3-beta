@@ -15,21 +15,33 @@ function App() {
   const [announcement, setAnnouncement] = useState('');
   const [audio, setAudio] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [audioError, setAudioError] = useState('');
 
   useEffect(() => { fetch('/api/personas').then(r => r.json()).then(setPersonas).catch(() => {}); }, []);
   const active = players[selected];
   const validPlayers = useMemo(() => players.filter(p => p.name.trim()), [players]);
-
   const update = (index: number, patch: Partial<Player>) => setPlayers(prev => prev.map((p, i) => i === index ? { ...p, ...patch } : p));
   const move = (index: number, direction: -1 | 1) => setPlayers(prev => { const next = index + direction; if (next < 0 || next >= prev.length) return prev; const copy = [...prev]; [copy[index], copy[next]] = [copy[next], copy[index]]; return copy; });
+
   const announce = async (player = active) => {
     if (!player?.name.trim()) return;
-    setBusy(true); setAudio(null);
+    setBusy(true); setAudio(null); setAudioError('');
     try {
       const r = await fetch('/api/announce', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ player, personaId, generateAudio: true }) });
-      const data = await r.json(); if (!r.ok) throw new Error(data.error || 'Announcement failed');
-      setAnnouncement(data.text); if (data.audioBase64) setAudio(`data:audio/mpeg;base64,${data.audioBase64}`);
-    } catch (e) { setAnnouncement(e instanceof Error ? e.message : 'Announcement failed'); } finally { setBusy(false); }
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Announcement failed');
+      setAnnouncement(data.text || '');
+      if (!data.audioBase64) throw new Error('The script was generated, but TTS returned no audio. Check OPENAI_API_KEY and the TTS model configuration in Vercel.');
+      const audioUrl = `data:audio/mpeg;base64,${data.audioBase64}`;
+      setAudio(audioUrl);
+      const playerAudio = new Audio(audioUrl);
+      playerAudio.preload = 'auto';
+      await playerAudio.play();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Announcement failed';
+      setAudioError(message);
+      if (!announcement) setAnnouncement(message);
+    } finally { setBusy(false); }
   };
   const precache = async () => { setBusy(true); try { await fetch('/api/precache', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ players: validPlayers, personaId }) }); } finally { setBusy(false); } };
   const add = () => players.length < 15 && setPlayers(p => [...p, blank(p.length)]);
@@ -44,9 +56,8 @@ function App() {
           <div className="slots">{players.map((p, i) => <div className={`slot ${i === selected ? 'selected' : ''}`} key={p.id} onClick={() => setSelected(i)}><span className="order">{i + 1}</span><input value={p.name} onChange={e => update(i,{name:e.target.value})} placeholder="Player name" onClick={e=>e.stopPropagation()}/><input className="num" type="number" min="0" max="99" value={p.number} onChange={e=>update(i,{number:Number(e.target.value)})} onClick={e=>e.stopPropagation()}/><button onClick={e=>{e.stopPropagation();move(i,-1)}} disabled={i===0}>↑</button><button onClick={e=>{e.stopPropagation();move(i,1)}} disabled={i===players.length-1}>↓</button><button className="delete" onClick={e=>{e.stopPropagation();remove(i)}}>×</button></div>)}</div></section>
         <section className="panel"><div className="panelHead"><h3>PLAYER PROFILE</h3></div><label>Nickname<input value={active?.nickname || ''} onChange={e=>update(selected,{nickname:e.target.value})} placeholder="The nickname the crowd knows"/></label><label>Hype cue / lore<textarea value={active?.lore || ''} onChange={e=>update(selected,{lore:e.target.value})} placeholder="A safe, factual cue for the announcer…"/></label><div className="personas"><span className="label">ANNOUNCER PERSONA</span>{personas.map(p=><button key={p.id} className={personaId===p.id?'persona active':'persona'} onClick={()=>setPersonaId(p.id)}><b>{p.name}</b><small>{p.style}</small></button>)}</div></section>
       </div>
-      <section className="panel output"><div className="panelHead"><h3>PA OUTPUT</h3>{audio && <audio controls src={audio}/>}</div><div className="script">{announcement || 'Your generated announcement will appear here.'}</div></section>
+      <section className="panel output"><div className="panelHead"><h3>PA OUTPUT</h3>{audio && <audio controls src={audio}/>}</div><div className="script">{announcement || 'Your generated announcement will appear here.'}</div>{audioError && <p role="alert">Audio: {audioError}</p>}</section>
     </main><footer>0.3 BETA · LINEUP FIRST · PERSONA TTS · BUILT FOR THE BALLPARK</footer>
   </div>;
 }
-
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
