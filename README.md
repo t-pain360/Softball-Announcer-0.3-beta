@@ -2,19 +2,20 @@
 
 A fully local softball/baseball public-address announcer for game-day use. Player data, announcement generation, and speech stay on the local machine. **No OpenAI API key, Gemini key, cloud TTS service, or Vercel deployment is required.**
 
-> **Status:** 0.3 local beta — active development.
+> **Status:** 0.3 local beta — NeuTTS Air edition.
 
-## What changed from 0.3 Beta
+## What changed from the Piper local version
 
-The local version removes the cloud AI dependency:
+The local edition now uses **NeuTTS Air** for open-source, on-device speech synthesis. NeuTTS Air supports local voice cloning from a short reference WAV plus transcript, GGUF backbones, and local inference. citeturn0search2turn0search0
 
-- Removed the OpenAI Node SDK.
-- Removed `OPENAI_API_KEY` and cloud model configuration.
-- Announcement scripts are generated deterministically from local templates.
-- **Piper TTS** is the preferred open-source local speech engine.
-- If Piper is not configured, the browser's local `SpeechSynthesis` API is used as a fallback.
-- Audio and scripts are cached only in the running server's memory.
-- Vercel configuration has been removed because Piper requires a local runtime/model.
+- Removed Piper configuration and process execution.
+- Added a local Python NeuTTS Air service under `tts/`.
+- Node/Express automatically starts the Python TTS service when the first announcement needs audio.
+- Four personas map to four local voice-reference pairs.
+- Announcement scripts remain deterministic local templates; no LLM is required.
+- Browser SpeechSynthesis remains a fallback if NeuTTS Air or a reference voice is unavailable.
+- Audio is WAV and is cached only in server memory.
+- No OpenAI/Gemini credentials are used.
 
 ## Architecture
 
@@ -31,118 +32,106 @@ The local version removes the cloud AI dependency:
 ├──────────────────────────────┤
 │ Local announcement templates │
 │ Persona selection             │
-│ In-memory cache               │
-│ Piper process launcher        │
+│ In-memory audio cache         │
+│ NeuTTS service launcher       │
 └──────────────┬───────────────┘
-               │ local process
+               │ localhost HTTP
                ▼
 ┌──────────────────────────────┐
-│        Piper TTS              │
-│      Open-source / local      │
-│         WAV output            │
-└──────────────────────────────┘
+│     Python / NeuTTS Air      │
+│       local TTS service      │
+├──────────────────────────────┤
+│ GGUF backbone                │
+│ Local reference voice        │
+│ Local NeuCodec                │
+└──────────────┬───────────────┘
+               ▼
+          WAV audio
 
 Fallback:
 Browser SpeechSynthesis → local OS/browser voice
 ```
 
-There are **no outbound AI requests** in the application code.
+NeuTTS Air's upstream documentation recommends GGUF backbones, pre-encoded references, and an ONNX codec decoder when minimizing on-device latency. citeturn0search2
 
 ## 🎙️ Announcer Personas
 
-| Persona | Local style |
+| Persona | Voice reference |
 |---|---|
-| **Classic PA** | Authoritative, warm, deliberate stadium PA |
-| **Hype Crew** | High-energy, modern ballpark MC |
-| **Golden Age Radio** | Crisp vintage baseball-radio style |
-| **Velvet PA** | Smooth, confident, polished with dramatic pauses |
+| **Classic PA** | `voices/classic.wav` + `classic.txt` |
+| **Hype Crew** | `voices/hype.wav` + `hype.txt` |
+| **Golden Age Radio** | `voices/radio.wav` + `radio.txt` |
+| **Velvet PA** | `voices/velvet.wav` + `velvet.txt` |
 
-Personas currently control the local announcement template and browser-speech pacing. Piper uses the configured local model.
+These are reference recordings, not four separately trained models. NeuTTS Air clones the characteristics of the supplied reference during inference. The upstream project recommends clean continuous speech, mono WAV, 16–44 kHz, and roughly 3–15 seconds for references. citeturn0search3
 
-## 🔊 Piper TTS
+Use only recordings you own or have permission to clone.
 
-[Piper](https://github.com/rhasspy/piper) is the preferred TTS engine for this version. Piper runs locally and produces speech without sending the announcement to a cloud speech provider.
+## 🔊 NeuTTS Air Setup
 
-### Install Piper
+NeuTTS Air requires Python 3.11+ and eSpeak NG. GGUF inference uses `llama-cpp-python`; the upstream project also supports an ONNX decoder. citeturn0search2
 
-The easiest Python-based installation is:
+### 1. Install eSpeak NG
 
-```bash
-python3 -m pip install piper-tts
-```
-
-Verify it is available:
+On Ubuntu/Debian:
 
 ```bash
-piper --help
+sudo apt install espeak-ng
 ```
 
-Download a Piper voice/model using the Piper tooling appropriate to your installation. Store the model somewhere on the local machine, for example:
+### 2. Create a Python environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r tts/requirements.txt
+```
+
+### 3. Configure the local service
+
+Optional `.env` values:
+
+```env
+NEUTTS_PYTHON=.venv/bin/python
+NEUTTS_HOST=127.0.0.1
+NEUTTS_PORT=8011
+NEUTTS_BACKBONE=neuphonic/neutts-air-q4-gguf
+NEUTTS_CODEC=neuphonic/neucodec
+NEUTTS_BACKBONE_DEVICE=cpu
+NEUTTS_CODEC_DEVICE=cpu
+```
+
+The first run downloads the model assets from the configured model repositories. NeuTTS Air documents GGUF backbones as the efficient local option. citeturn0search2
+
+### 4. Add voice references
+
+Create:
 
 ```text
-/home/timw1982/Softball/models/en_US-lessac-medium.onnx
+voices/
+├── classic.wav
+├── classic.txt
+├── hype.wav
+├── hype.txt
+├── radio.wav
+├── radio.txt
+├── velvet.wav
+└── velvet.txt
 ```
 
-Then configure the model path in `.env`:
+Each `.txt` file must contain the exact words spoken in its corresponding WAV reference.
 
-```env
-PIPER_MODEL=/home/timw1982/Softball/models/en_US-lessac-medium.onnx
-```
+The first synthesis for a voice encodes and caches its reference. Subsequent announcements reuse the encoded reference within the Python service.
 
-If `piper` is not on your `PATH`, set its executable explicitly:
-
-```env
-PIPER_BIN=/home/timw1982/.local/bin/piper
-```
-
-Optional timeout:
-
-```env
-PIPER_TIMEOUT_MS=30000
-```
-
-### No model? No problem
-
-If `PIPER_MODEL` is not configured, the app still works. It returns the locally generated announcement text and the browser uses `SpeechSynthesis` to speak it.
-
-## 🚀 Local Development
-
-### Requirements
-
-- Node.js 18+ recommended
-- npm
-- Python 3 if using Piper
-- Piper and a compatible local voice model for open-source TTS
-
-### Install
+### 5. Start the app
 
 ```bash
 npm install
-```
-
-### Configure Piper
-
-Create `.env` in the project root:
-
-```env
-PIPER_MODEL=/absolute/path/to/your/voice.onnx
-```
-
-Optional:
-
-```env
-PORT=3000
-PIPER_BIN=piper
-PIPER_TIMEOUT_MS=30000
-```
-
-**There is no `OPENAI_API_KEY` setting.**
-
-### Start
-
-```bash
 npm run dev
 ```
+
+The Node server automatically starts the NeuTTS Python service when audio is requested.
 
 Open:
 
@@ -150,28 +139,33 @@ Open:
 http://localhost:3000
 ```
 
-### Production-style local run
+## 🧠 Local Announcement Generation
 
-```bash
-npm run build
-npm start
-```
+This version deliberately does **not** require a local LLM. Scripts are deterministic templates, which is preferable for a game-day PA because it prevents invented statistics or game facts.
 
-The production server serves the Vite `dist` directory.
+Announcements:
+
+- Include the player's name and jersey number.
+- May include the supplied nickname.
+- May include the supplied hype/lore cue.
+- Are short and PA-friendly.
+- Do not invent statistics, positions, achievements, scores, innings, or game situations.
+
+NeuTTS Air is responsible only for turning that trusted local text into speech.
 
 ## 📡 Local API
 
 ### `GET /api/health`
 
-Returns local-runtime information:
+Returns local runtime state:
 
 ```json
 {
   "ok": true,
   "localOnly": true,
   "cloudAI": false,
-  "tts": "piper",
-  "piperModelConfigured": true
+  "tts": "neutts-air",
+  "neuttsReady": true
 }
 ```
 
@@ -181,7 +175,7 @@ Returns the four local announcer personas.
 
 ### `POST /api/announce`
 
-Generates a local announcement and, when Piper is configured, local WAV audio.
+Generates local announcement text and, when NeuTTS Air is ready, local WAV audio.
 
 ```json
 {
@@ -197,74 +191,51 @@ Generates a local announcement and, when Piper is configured, local WAV audio.
 }
 ```
 
-A Piper response contains Base64-encoded WAV audio:
+A NeuTTS response contains Base64-encoded WAV audio:
 
 ```json
 {
   "text": "Your attention please... Now batting... number 14, Jordan Smith, J-Smooth.",
   "audioBase64": "...",
-  "audioType": "piper_wav",
-  "voice": "/path/to/voice.onnx",
+  "audioType": "neutts_wav",
+  "voice": "classic",
   "audioAvailable": true
 }
 ```
 
-When Piper is unavailable:
-
-```json
-{
-  "text": "...",
-  "audioType": "browser_speech",
-  "voice": "browser-local",
-  "audioAvailable": false
-}
-```
-
-The browser then speaks the returned text locally.
-
 ### `POST /api/precache`
 
-Pre-generates local announcements for up to 15 players. Piper audio is cached in memory for rapid replay during a game.
+Pre-generates local announcements for up to 15 players. Generated WAV audio is cached in memory for rapid replay.
 
-## 🧠 Local Announcement Rules
+## 🔐 Privacy
 
-The local generator intentionally avoids an LLM so it cannot invent player statistics or game facts.
+This edition is designed for local/offline operation.
 
-Announcements:
+- No OpenAI credentials.
+- No Gemini credentials.
+- No cloud TTS calls.
+- Player data stays on the local machine unless you deliberately expose the server.
+- Voice reference recordings remain local.
+- NeuTTS Air inference runs locally.
+- The server cache disappears when the application stops.
 
-- Include the player's name and jersey number.
-- May include the supplied nickname.
-- May include the supplied hype/lore cue.
-- Are short and PA-friendly.
-- Do not invent statistics, positions, achievements, scores, innings, or game situations.
-
-## 🔐 Privacy & Security
-
-This version is designed for local/offline operation.
-
-- No AI API keys are required.
-- No OpenAI credentials are stored or transmitted.
-- No Gemini credentials are stored or transmitted.
-- Player information stays on the local machine unless you deliberately expose the server yourself.
-- Piper speech generation happens as a local child process.
-- The cache exists only in server memory and disappears when the server stops.
-
-For a game-day computer, bind the application to localhost if remote access is not required.
+NeuTTS Air adds a Perth perceptual-threshold watermark to generated audio according to its upstream documentation. citeturn0search2
 
 ## ⚡ Game-Day Workflow
 
-1. Install Node and Piper.
-2. Download a Piper voice model.
-3. Set `PIPER_MODEL` in `.env`.
-4. Run `npm install`.
-5. Run `npm run dev`.
-6. Open `http://localhost:3000`.
-7. Enter the lineup.
-8. Select an announcer persona.
-9. Press **PRE-CACHE LINEUP** before the game.
-10. Announce each batter from the booth.
+1. Install Node.js and Python 3.11+.
+2. Install eSpeak NG.
+3. Create the Python virtual environment.
+4. Install `tts/requirements.txt`.
+5. Add your authorized voice references.
+6. Run `npm install`.
+7. Run `npm run dev`.
+8. Enter the lineup.
+9. Select a persona.
+10. Press **PRE-CACHE LINEUP** before the game.
+11. Announce batters from the booth.
 
-Pre-caching is recommended because it gives the local machine time to generate the WAV files before they are needed.
+Pre-caching is recommended because NeuTTS Air is a neural model and generating the audio before it is needed reduces game-time latency.
 
 ## 🛠️ Tech Stack
 
@@ -272,75 +243,100 @@ Pre-caching is recommended because it gives the local machine time to generate t
 - TypeScript
 - Vite
 - Express
-- Piper TTS
+- Python 3.11+
+- NeuTTS Air
+- NeuCodec
+- llama-cpp-python for GGUF inference
+- FastAPI/Uvicorn local TTS service
 - Browser SpeechSynthesis fallback
-- Lucide React
 
-There is intentionally **no OpenAI SDK or other cloud AI SDK** in this local version.
+NeuTTS Air's official examples use `NeuTTSAir`, a reference WAV/transcript pair, and write 24 kHz WAV output. citeturn0search2
 
 ## 📁 Project Structure
 
 ```text
 .
-├── .github/          # GitHub configuration/workflows
-├── api/               # Legacy deployment files from the upstream project
-├── src/               # React application
-├── index.html         # Vite entry point
-├── server.ts          # Local Express API + Piper integration
-├── package.json       # Local dependencies/scripts
-└── tsconfig.json      # TypeScript configuration
+├── src/                    # React application
+├── tts/
+│   ├── neutts_service.py  # Local NeuTTS Air HTTP service
+│   └── requirements.txt    # Python dependencies
+├── voices/
+│   └── README.md           # Voice-reference instructions
+├── index.html
+├── server.ts               # Express API + local TTS launcher
+├── package.json
+└── tsconfig.json
 ```
 
 ## 🧪 Troubleshooting
 
 ### `OPENAI_API_KEY is not configured`
 
-That message belongs to the cloud 0.3 beta. The local branch does not require or use OpenAI. Make sure you are running the `local-version` branch.
+That message belongs to the cloud 0.3 beta. The `local-version` branch does not use OpenAI. Make sure you are running the local branch and not the upstream cloud version.
 
-### Piper is unavailable
+### NeuTTS service does not start
 
-Check:
-
-```bash
-which piper
-piper --help
-```
-
-Then check:
+Check Python:
 
 ```bash
-echo "$PIPER_MODEL"
-ls -lh "$PIPER_MODEL"
+.venv/bin/python --version
 ```
 
-If the model is not configured, the application will use browser-local SpeechSynthesis instead.
+Check dependencies:
+
+```bash
+.venv/bin/python -c "from neuttsair.neutts import NeuTTSAir; print('NeuTTS import OK')"
+```
+
+Check eSpeak NG:
+
+```bash
+espeak-ng --version
+```
+
+### A persona says its reference is missing
+
+Add both files:
+
+```text
+voices/classic.wav
+voices/classic.txt
+```
+
+and make sure the transcript exactly matches the recording.
+
+### NeuTTS Air is too slow
+
+Use the GGUF backbone and pre-encode references. The upstream project specifically recommends GGUF, pre-encoded references, and an ONNX codec decoder for lower latency. citeturn0search2
+
+If your machine has a supported GPU, configure the appropriate acceleration for `llama-cpp-python` and the NeuTTS backend.
 
 ### `dist/index.html` does not exist
 
-Build the frontend before starting in production mode:
+For development:
+
+```bash
+npm run dev
+```
+
+For production-style local execution:
 
 ```bash
 npm run build
 npm start
 ```
 
-For development, use:
-
-```bash
-npm run dev
-```
-
 ## 🗺️ Roadmap
 
-- Add downloadable/managed Piper voice setup.
-- Add multiple Piper voice profiles per persona.
-- Add adjustable pitch and speaking rate.
+- Add a voice-reference recorder inside the app.
+- Add voice preview/testing.
+- Add per-persona speed controls.
 - Add offline lineup save/load.
 - Add keyboard shortcuts for game-day operation.
-- Add local audio effects and walk-up music.
-- Add a local mixer for PA volume and ducking.
-- Package the application as a desktop app for Windows/Linux.
-- Add a fully offline installer containing Node, Piper, and selected voice models.
+- Add local walk-up music and PA effects.
+- Add local audio mixing/ducking.
+- Package as a Windows/Linux desktop app.
+- Provide a one-command offline installer.
 
 ## 📄 License
 
@@ -348,4 +344,4 @@ No license file is currently specified in the upstream repository. Until a licen
 
 ## 🥎 Local Edition
 
-**Softball Announcer — Local Version** is intended to be a dependable game-day PA tool that keeps the entire announcement pipeline on the operator's computer: local player data → local announcement logic → local Piper speech → local speakers.
+**Softball Announcer — NeuTTS Air Local Version** keeps the entire announcement pipeline on the operator's computer: local player data → local announcement templates → local NeuTTS Air voice cloning → local WAV audio → local speakers.
