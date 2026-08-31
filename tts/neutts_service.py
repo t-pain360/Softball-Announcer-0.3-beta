@@ -1,8 +1,10 @@
 import base64
 import os
+import re
 from pathlib import Path
 from functools import lru_cache
 
+import numpy as np
 import soundfile as sf
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -16,6 +18,10 @@ CODEC = os.getenv("NEUTTS_CODEC", "neuphonic/neucodec")
 LANGUAGE = os.getenv("NEUTTS_LANGUAGE", "en-us")
 BACKBONE_DEVICE = os.getenv("NEUTTS_BACKBONE_DEVICE", "cpu")
 CODEC_DEVICE = os.getenv("NEUTTS_CODEC_DEVICE", "cpu")
+# NeuTTS Air has a 2048-token context window including the reference prompt.
+# Keep synthesis chunks deliberately below that ceiling so long generated
+# announcements never fail with "Requested tokens exceed context window".
+MAX_SYNTH_CHARS = int(os.getenv("NEUTTS_MAX_SYNTH_CHARS", "1200"))
 
 # If the gated Q4 model has already been downloaded, use the local GGUF file
 # directly. NeuTTS/llama.cpp supports a filesystem path and this prevents a
@@ -67,9 +73,56 @@ def reference_codes(voice: str):
     return tts.encode_reference(str(wav_path)), ref_text
 
 
+def split_text(text: str, max_chars: int = MAX_SYNTH_CHARS):
+    """Split long announcements at sentence/word boundaries.
+
+    Character limits are intentionally conservative because NeuTTS Air's
+    2048-token context includes the reference prompt as well as the output.
+    """
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return [text]
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks = []
+    current = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) > max_chars:
+            words = sentence.split()
+            for word in words:
+                candidate = f"{current} {word}".strip()
+                if current and len(candidate) > max_chars:
+                    chunks.append(current)
+                    current = word
+                else:
+                    current = candidate
+            continue
+
+        candidate = f"{current} {sentence}".strip()
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+    return chunks or [text[:max_chars]]
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "engine": "neutts-air", "backbone": BACKBONE, "language": LANGUAGE}
+    return {
+        "ok": True,
+        "engine": "neutts-air",
+        "backbone": BACKBONE,
+        "language": LANGUAGE,
+        "maxSynthChars": MAX_SYNTH_CHARS,
+    }
 
 
 @app.post("/synthesize")
@@ -79,12 +132,25 @@ def synthesize(request: SynthesisRequest):
         return {"error": "text is required"}
     try:
         ref_codes, ref_text = reference_codes(request.voice)
-        wav = tts.infer(text, ref_codes, ref_text)
+        chunks = split_text(text)
+        print(f"[NeuTTS] Synthesizing {len(chunks)} chunk(s)", flush=True)
+        audio_chunks = []
+        for index, chunk in enumerate(chunks, start=1):
+            print(f"[NeuTTS] Chunk {index}/{len(chunks)} ({len(chunk)} chars)", flush=True)
+            wav = tts.infer(chunk, ref_codes, ref_text)
+            audio_chunks.append(np.asarray(wav, dtype=np.float32))
+
+        wav = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
         output = Path("/tmp") / f"softball-neutts-{os.getpid()}.wav"
         sf.write(output, wav, 24000)
         audio = base64.b64encode(output.read_bytes()).decode("ascii")
         output.unlink(missing_ok=True)
-        return {"audioBase64": audio, "voice": request.voice, "sampleRate": 24000}
+        return {
+            "audioBase64": audio,
+            "voice": request.voice,
+            "sampleRate": 24000,
+            "chunks": len(chunks),
+        }
     except Exception as exc:
         return {"error": str(exc)}
 
