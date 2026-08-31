@@ -82,11 +82,12 @@ async function synthesize(text: string, persona: Persona) {
   try {
     await startNeutts();
     const response = await fetch(`${NEUTTS_URL}/synthesize`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: limitText(text), voice: persona.voice }), signal: AbortSignal.timeout(NEUTTS_TIMEOUT_MS) });
-    const data = await response.json() as { audioBase64?: string; voice?: string; error?: string };
+    const data = await response.json() as { audioBase64?: string; voice?: string; error?: string; engine?: string };
     if (!response.ok || !data.audioBase64) throw new Error(data.error || `NeuTTS returned HTTP ${response.status}`);
     return { audioBase64: data.audioBase64, audioType: 'neutts_wav' as const, voice: data.voice ?? persona.voice };
   } catch (error) {
-    console.warn('NeuTTS Air unavailable; using browser SpeechSynthesis fallback:', error instanceof Error ? error.message : error);
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`NeuTTS Air synthesis failed; using browser SpeechSynthesis fallback: ${detail}`);
     return { audioType: 'browser_speech' as const, voice: 'browser-local' };
   }
 }
