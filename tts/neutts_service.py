@@ -19,6 +19,7 @@ LANGUAGE = os.getenv("NEUTTS_LANGUAGE", "en-us")
 BACKBONE_DEVICE = os.getenv("NEUTTS_BACKBONE_DEVICE", "cpu")
 CODEC_DEVICE = os.getenv("NEUTTS_CODEC_DEVICE", "cpu")
 MAX_CONTEXT_TOKENS = int(os.getenv("NEUTTS_MAX_CONTEXT_TOKENS", "2048"))
+MIN_GENERATION_TOKENS = int(os.getenv("NEUTTS_MIN_GENERATION_TOKENS", "64"))
 
 if BACKBONE == "neuphonic/neutts-air-q4-gguf":
     try:
@@ -55,9 +56,15 @@ def paths_for_voice(voice: str):
 def reference_codes(voice: str):
     wav_path, txt_path = paths_for_voice(voice)
     if not wav_path.exists() or not txt_path.exists():
-        raise FileNotFoundError(
-            f"Missing NeuTTS reference for '{voice}'. Add {wav_path} and {txt_path}."
-        )
+        if voice != "classic":
+            fallback_wav, fallback_txt = paths_for_voice("classic")
+            if fallback_wav.exists() and fallback_txt.exists():
+                print(f"[NeuTTS] No reference for '{voice}'; using classic reference voice", flush=True)
+                wav_path, txt_path = fallback_wav, fallback_txt
+        if not wav_path.exists() or not txt_path.exists():
+            raise FileNotFoundError(
+                f"Missing NeuTTS reference for '{voice}'. Add {wav_path} and {txt_path}."
+            )
     ref_text = txt_path.read_text(encoding="utf-8").strip()
     if not ref_text:
         raise ValueError(f"Reference transcript is empty: {txt_path}")
@@ -65,48 +72,49 @@ def reference_codes(voice: str):
     return codes, ref_text
 
 
+def ggml_prompt(text: str, ref_codes, ref_text: str) -> str:
+    return tts._ggml_prompt(ref_codes, ref_text, text)
+
+
 def prompt_token_count(text: str, ref_codes, ref_text: str) -> int:
-    prompt = tts._ggml_prompt(ref_codes, ref_text, text)
+    prompt = ggml_prompt(text, ref_codes, ref_text)
     return len(tts.backbone.tokenize(prompt.encode("utf-8"), add_bos=True))
 
 
 def fit_reference_to_context(ref_codes, ref_text: str):
-    """Trim only when the reference itself leaves no usable context."""
     codes = list(ref_codes)
     if not codes:
         raise ValueError("NeuTTS reference audio produced no codec codes")
 
     original = len(codes)
-    while codes and prompt_token_count("", codes, ref_text) >= MAX_CONTEXT_TOKENS:
+    prompt_limit = MAX_CONTEXT_TOKENS - MIN_GENERATION_TOKENS
+    while codes and prompt_token_count("", codes, ref_text) > prompt_limit:
         new_len = max(1, int(len(codes) * 0.80))
         if new_len == len(codes):
             new_len -= 1
         codes = codes[:new_len]
 
     empty_tokens = prompt_token_count("", codes, ref_text)
-    if not codes or empty_tokens >= MAX_CONTEXT_TOKENS:
+    if not codes or empty_tokens > prompt_limit:
         raise ValueError(
-            f"NeuTTS reference is too large for the {MAX_CONTEXT_TOKENS}-token context window. "
+            f"NeuTTS reference requires {empty_tokens} prompt tokens; safe limit is {prompt_limit}. "
             "Use a shorter reference WAV and matching transcript."
         )
 
-    if len(codes) != original:
-        print(
-            f"[NeuTTS] Trimmed reference codec prompt from {original} to {len(codes)} codes "
-            f"(empty prompt={empty_tokens} tokens)",
-            flush=True,
-        )
-    else:
-        print(f"[NeuTTS] Reference prompt={empty_tokens} tokens", flush=True)
+    print(
+        f"[NeuTTS] Reference prompt={empty_tokens} tokens; safe limit={prompt_limit}"
+        + (f"; trimmed codes {original}->{len(codes)}" if len(codes) != original else ""),
+        flush=True,
+    )
     return codes
 
 
 def split_text_for_context(text: str, ref_codes, ref_text: str):
-    """Pack text to the actual 2048-token input limit, not a character estimate."""
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
 
+    prompt_limit = MAX_CONTEXT_TOKENS - MIN_GENERATION_TOKENS
     words = text.split()
     chunks = []
     current = []
@@ -114,16 +122,19 @@ def split_text_for_context(text: str, ref_codes, ref_text: str):
     for word in words:
         candidate = " ".join(current + [word])
         tokens = prompt_token_count(candidate, ref_codes, ref_text)
-        if tokens < MAX_CONTEXT_TOKENS:
+        if tokens <= prompt_limit:
             current.append(word)
         elif current:
             chunks.append(" ".join(current))
             current = [word]
+            single_tokens = prompt_token_count(word, ref_codes, ref_text)
+            if single_tokens > prompt_limit:
+                raise ValueError(
+                    f"A single announcement word requires {single_tokens} prompt tokens; safe limit is {prompt_limit}."
+                )
         else:
-            # A pathological single token cannot fit even by itself.
             raise ValueError(
-                f"A single announcement word requires {tokens} tokens with the current reference. "
-                "Use a shorter reference voice sample."
+                f"A single announcement word requires {tokens} prompt tokens; safe limit is {prompt_limit}."
             )
 
     if current:
@@ -132,34 +143,37 @@ def split_text_for_context(text: str, ref_codes, ref_text: str):
 
 
 def infer_with_context_budget(chunk, ref_codes, ref_text):
-    """Set generation max_tokens to the context remaining after the prompt.
-
-    llama.cpp's context requirement is prompt_tokens + max_tokens. NeuTTS's
-    upstream GGML implementation uses tts.max_context as max_tokens, which can
-    therefore request 2048 generated tokens even when the prompt already uses
-    part of the 2048-token context. Dynamically limiting max_context to the
-    remaining budget avoids that failure while preserving as much generation
-    room as possible.
-    """
-    prompt_tokens = prompt_token_count(chunk, ref_codes, ref_text)
+    """Use the actual llama.cpp object with an explicit remaining-token budget."""
+    prompt = ggml_prompt(chunk, ref_codes, ref_text)
+    prompt_tokens = len(tts.backbone.tokenize(prompt.encode("utf-8"), add_bos=True))
     remaining = MAX_CONTEXT_TOKENS - prompt_tokens
-    if remaining < 64:
+
+    if prompt_tokens > MAX_CONTEXT_TOKENS:
         raise ValueError(
-            f"Prompt is {prompt_tokens} tokens, leaving only {remaining} tokens for generation. "
-            "Use a shorter announcement or reference voice sample."
+            f"NeuTTS prompt is {prompt_tokens} tokens, exceeding the {MAX_CONTEXT_TOKENS}-token context."
+        )
+    if remaining < MIN_GENERATION_TOKENS:
+        raise ValueError(
+            f"NeuTTS prompt is {prompt_tokens} tokens, leaving only {remaining} tokens for generation; "
+            f"minimum is {MIN_GENERATION_TOKENS}."
         )
 
-    previous = tts.max_context
-    try:
-        tts.max_context = remaining
-        print(
-            f"[NeuTTS] Prompt={prompt_tokens} tokens; max_tokens={remaining} "
-            f"(context={MAX_CONTEXT_TOKENS})",
-            flush=True,
-        )
-        return np.asarray(tts.infer(chunk, ref_codes, ref_text), dtype=np.float32)
-    finally:
-        tts.max_context = previous
+    print(
+        f"[NeuTTS] Exact llama.cpp request: prompt={prompt_tokens}, "
+        f"max_tokens={remaining}, total={prompt_tokens + remaining}/{MAX_CONTEXT_TOKENS}",
+        flush=True,
+    )
+
+    output = tts.backbone(
+        prompt,
+        max_tokens=remaining,
+        temperature=1.0,
+        top_k=50,
+        stop=["<|SPEECH_GENERATION_END|>"],
+    )
+    output_str = output["choices"][0]["text"]
+    wav = tts._decode(output_str)
+    return np.asarray(tts.watermarker.apply_watermark(wav, sample_rate=24000), dtype=np.float32)
 
 
 def synthesize_chunks(text, ref_codes, ref_text):
@@ -179,7 +193,7 @@ def synthesize_chunks(text, ref_codes, ref_text):
             requested = int(match.group(1))
             limit = int(match.group(2))
             print(
-                f"[NeuTTS] Context request {requested}>{limit}; splitting chunk {index} and retrying",
+                f"[NeuTTS] llama.cpp rejected request {requested}>{limit}; splitting chunk {index} and retrying",
                 flush=True,
             )
 
@@ -205,7 +219,8 @@ def health():
         "backbone": BACKBONE,
         "language": LANGUAGE,
         "contextTokens": MAX_CONTEXT_TOKENS,
-        "build": "dynamic-max-tokens-v4",
+        "minimumGenerationTokens": MIN_GENERATION_TOKENS,
+        "build": "direct-llama-context-budget-v5",
     }
 
 
