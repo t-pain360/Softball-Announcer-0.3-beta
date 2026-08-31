@@ -40,6 +40,13 @@ if ! "$PYTHON" -c 'import fastapi, uvicorn, soundfile, neuttsair; from torchao.d
   exit 1
 fi
 
+# Prevent a previous NeuTTS process from occupying port 8011 with an older
+# copy of neutts_service.py. This is safe for this checkout because the match
+# is the absolute path to this project's service file.
+if command -v pkill >/dev/null 2>&1; then
+  pkill -f "$ROOT/tts/neutts_service.py" 2>/dev/null || true
+fi
+
 # Resolve an already-downloaded gated Q4 GGUF into a filesystem path. NeuTTS
 # passes a filesystem path directly to llama.cpp, so once the model exists in
 # the Hugging Face cache startup is completely local and does not re-authenticate.
@@ -94,12 +101,16 @@ if [ ! -s "$VOICE_DIR/classic.wav" ] || [ ! -s "$VOICE_DIR/classic.txt" ]; then
 fi
 
 export NEUTTS_PYTHON="$PYTHON"
+export NEUTTS_MAX_CONTEXT_TOKENS="2048"
+export NEUTTS_MIN_GENERATION_TOKENS="64"
 export NODE_ENV="${NODE_ENV:-development}"
 
 echo ""
 echo "🥎 Softball Announcer — Local Version"
 echo "   No OpenAI or Gemini API key required."
 echo "   TTS: NeuTTS Air (local)"
+echo "   NeuTTS context: ${NEUTTS_MAX_CONTEXT_TOKENS} tokens"
+echo "   NeuTTS generation reserve: ${NEUTTS_MIN_GENERATION_TOKENS} tokens"
 echo "   NeuTTS backbone: $NEUTTS_BACKBONE"
 echo "   NeuTTS reference: $VOICE_DIR/classic.wav"
 echo "   Node: $(node --version)"
