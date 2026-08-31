@@ -143,7 +143,7 @@ def split_text_for_context(text: str, ref_codes, ref_text: str):
 
 
 def infer_with_context_budget(chunk, ref_codes, ref_text):
-    """Use the actual llama.cpp object with an explicit remaining-token budget."""
+    """Generate with an exact prompt+generation budget and a fresh llama.cpp context."""
     prompt = ggml_prompt(chunk, ref_codes, ref_text)
     prompt_tokens = len(tts.backbone.tokenize(prompt.encode("utf-8"), add_bos=True))
     remaining = MAX_CONTEXT_TOKENS - prompt_tokens
@@ -164,16 +164,40 @@ def infer_with_context_budget(chunk, ref_codes, ref_text):
         flush=True,
     )
 
+    # NeuTTS itself resets llama.cpp before every non-streaming inference.
+    # Without this, repeated /synthesize requests can inherit stale KV-cache state
+    # and produce empty output (which upstream code then indexes as choices[0]).
+    tts.backbone.reset()
     output = tts.backbone(
         prompt,
         max_tokens=remaining,
         temperature=1.0,
         top_k=50,
         stop=["<|SPEECH_GENERATION_END|>"],
+        seed=tts._call_seed(),
     )
-    output_str = output["choices"][0]["text"]
+
+    choices = output.get("choices") if isinstance(output, dict) else None
+    if not choices:
+        raise RuntimeError(
+            f"llama.cpp returned no choices for a {prompt_tokens}-token prompt "
+            f"with max_tokens={remaining}. Raw response keys: "
+            f"{list(output.keys()) if isinstance(output, dict) else type(output).__name__}"
+        )
+
+    output_str = choices[0].get("text", "")
+    if not output_str:
+        raise RuntimeError("llama.cpp returned an empty speech-token response")
+
+    # NeuTTS upstream raises a useful error when no speech tokens are present.
+    speech_token_count = len(re.findall(r"<\\|speech_(\\d+)\\|>", output_str))
+    if speech_token_count == 0:
+        raise RuntimeError("NeuTTS generated no valid speech tokens")
+
     wav = tts._decode(output_str)
-    return np.asarray(tts.watermarker.apply_watermark(wav, sample_rate=24000), dtype=np.float32)
+    if tts.watermarker is not None:
+        wav = tts.watermarker.apply_watermark(wav, sample_rate=24000)
+    return np.asarray(wav, dtype=np.float32)
 
 
 def synthesize_chunks(text, ref_codes, ref_text):
@@ -220,7 +244,7 @@ def health():
         "language": LANGUAGE,
         "contextTokens": MAX_CONTEXT_TOKENS,
         "minimumGenerationTokens": MIN_GENERATION_TOKENS,
-        "build": "direct-llama-context-budget-v5",
+        "build": "direct-llama-context-budget-v6-reset-guard",
     }
 
 
@@ -233,6 +257,8 @@ def synthesize(request: SynthesisRequest):
         ref_codes, ref_text = reference_codes(request.voice)
         ref_codes = fit_reference_to_context(ref_codes, ref_text)
         audio_chunks, chunk_count = synthesize_chunks(text, ref_codes, ref_text)
+        if not audio_chunks:
+            raise ValueError("NeuTTS produced no audio chunks")
         wav = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
         output = Path("/tmp") / f"softball-neutts-{os.getpid()}.wav"
         sf.write(output, wav, 24000)
