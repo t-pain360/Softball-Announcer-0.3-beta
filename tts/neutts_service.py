@@ -18,21 +18,15 @@ CODEC = os.getenv("NEUTTS_CODEC", "neuphonic/neucodec")
 LANGUAGE = os.getenv("NEUTTS_LANGUAGE", "en-us")
 BACKBONE_DEVICE = os.getenv("NEUTTS_BACKBONE_DEVICE", "cpu")
 CODEC_DEVICE = os.getenv("NEUTTS_CODEC_DEVICE", "cpu")
-# NeuTTS Air has a 2048-token context window including the reference prompt.
-# Keep synthesis chunks deliberately below that ceiling so long generated
-# announcements never fail with "Requested tokens exceed context window".
-MAX_SYNTH_CHARS = int(os.getenv("NEUTTS_MAX_SYNTH_CHARS", "1200"))
+# NeuTTS Air has a 2048-token context window INCLUDING the reference prompt.
+# Keep chunks conservative. If a particular sentence still exceeds the model
+# limit, synthesize_chunks() recursively splits it again on the exact error.
+MAX_SYNTH_CHARS = int(os.getenv("NEUTTS_MAX_SYNTH_CHARS", "500"))
 
-# If the gated Q4 model has already been downloaded, use the local GGUF file
-# directly. NeuTTS/llama.cpp supports a filesystem path and this prevents a
-# startup health check from triggering another Hugging Face request.
 if BACKBONE == "neuphonic/neutts-air-q4-gguf":
     try:
         from huggingface_hub import try_to_load_from_cache
-        cached = try_to_load_from_cache(
-            repo_id=BACKBONE,
-            filename="neutts-air-Q4_0.gguf",
-        )
+        cached = try_to_load_from_cache(repo_id=BACKBONE, filename="neutts-air-Q4_0.gguf")
         if cached and Path(cached).is_file():
             BACKBONE = cached
             print(f"Using cached local NeuTTS Air GGUF: {BACKBONE}", flush=True)
@@ -74,34 +68,20 @@ def reference_codes(voice: str):
 
 
 def split_text(text: str, max_chars: int = MAX_SYNTH_CHARS):
-    """Split long announcements at sentence/word boundaries.
-
-    Character limits are intentionally conservative because NeuTTS Air's
-    2048-token context includes the reference prompt as well as the output.
-    """
+    """Split text conservatively before calling NeuTTS Air."""
     text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
     if len(text) <= max_chars:
         return [text]
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
     chunks = []
     current = ""
-
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
             continue
-        if len(sentence) > max_chars:
-            words = sentence.split()
-            for word in words:
-                candidate = f"{current} {word}".strip()
-                if current and len(candidate) > max_chars:
-                    chunks.append(current)
-                    current = word
-                else:
-                    current = candidate
-            continue
-
         candidate = f"{current} {sentence}".strip()
         if current and len(candidate) > max_chars:
             chunks.append(current)
@@ -109,9 +89,46 @@ def split_text(text: str, max_chars: int = MAX_SYNTH_CHARS):
         else:
             current = candidate
 
+        # A single sentence can itself be very long.
+        while len(current) > max_chars:
+            cut = current.rfind(" ", 0, max_chars + 1)
+            if cut < max_chars // 2:
+                cut = max_chars
+            chunks.append(current[:cut].strip())
+            current = current[cut:].strip()
     if current:
         chunks.append(current)
-    return chunks or [text[:max_chars]]
+    return chunks
+
+
+def synthesize_chunks(text, ref_codes, ref_text):
+    """Synthesize with a retry that halves any chunk rejected by the model."""
+    chunks = split_text(text)
+    audio_chunks = []
+
+    def synthesize_one(chunk, depth=0):
+        print(f"[NeuTTS] Synthesizing chunk ({len(chunk)} chars)", flush=True)
+        try:
+            return [np.asarray(tts.infer(chunk, ref_codes, ref_text), dtype=np.float32)]
+        except Exception as exc:
+            message = str(exc)
+            context_error = "exceed context window" in message.lower() or "requested tokens" in message.lower()
+            if not context_error or len(chunk) <= 80 or depth >= 8:
+                raise
+            # The model's 2048-token limit includes the reference prompt, so
+            # halve rejected chunks rather than guessing a token/character ratio.
+            cut = len(chunk) // 2
+            split_at = chunk.rfind(" ", 0, cut + 1)
+            if split_at < 40:
+                split_at = cut
+            left = chunk[:split_at].strip()
+            right = chunk[split_at:].strip()
+            print(f"[NeuTTS] Context limit hit; splitting {len(chunk)} -> {len(left)} + {len(right)} chars", flush=True)
+            return synthesize_one(left, depth + 1) + synthesize_one(right, depth + 1)
+
+    for chunk in chunks:
+        audio_chunks.extend(synthesize_one(chunk))
+    return audio_chunks, len(chunks)
 
 
 @app.get("/health")
@@ -132,14 +149,7 @@ def synthesize(request: SynthesisRequest):
         return {"error": "text is required"}
     try:
         ref_codes, ref_text = reference_codes(request.voice)
-        chunks = split_text(text)
-        print(f"[NeuTTS] Synthesizing {len(chunks)} chunk(s)", flush=True)
-        audio_chunks = []
-        for index, chunk in enumerate(chunks, start=1):
-            print(f"[NeuTTS] Chunk {index}/{len(chunks)} ({len(chunk)} chars)", flush=True)
-            wav = tts.infer(chunk, ref_codes, ref_text)
-            audio_chunks.append(np.asarray(wav, dtype=np.float32))
-
+        audio_chunks, initial_chunks = synthesize_chunks(text, ref_codes, ref_text)
         wav = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
         output = Path("/tmp") / f"softball-neutts-{os.getpid()}.wav"
         sf.write(output, wav, 24000)
@@ -149,7 +159,8 @@ def synthesize(request: SynthesisRequest):
             "audioBase64": audio,
             "voice": request.voice,
             "sampleRate": 24000,
-            "chunks": len(chunks),
+            "chunks": len(audio_chunks),
+            "initialChunks": initial_chunks,
         }
     except Exception as exc:
         return {"error": str(exc)}
