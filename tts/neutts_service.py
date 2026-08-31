@@ -18,12 +18,9 @@ CODEC = os.getenv("NEUTTS_CODEC", "neuphonic/neucodec")
 LANGUAGE = os.getenv("NEUTTS_LANGUAGE", "en-us")
 BACKBONE_DEVICE = os.getenv("NEUTTS_BACKBONE_DEVICE", "cpu")
 CODEC_DEVICE = os.getenv("NEUTTS_CODEC_DEVICE", "cpu")
-# Budget against NeuTTS's actual tokenizer instead of guessing from characters.
-# 2048 is the complete model context, including the reference prompt.
 MAX_CONTEXT_TOKENS = int(os.getenv("NEUTTS_MAX_CONTEXT_TOKENS", "2048"))
-# Leave headroom for the generated speech tokens.  NeuTTS's own implementation
-# passes max_length=2048, so the input prompt itself must remain below this.
-PROMPT_TOKEN_HEADROOM = int(os.getenv("NEUTTS_PROMPT_TOKEN_HEADROOM", "256"))
+# Keep a conservative amount of room below llama.cpp's hard context limit.
+PROMPT_BUDGET = int(os.getenv("NEUTTS_PROMPT_BUDGET", "1500"))
 
 if BACKBONE == "neuphonic/neutts-air-q4-gguf":
     try:
@@ -66,97 +63,148 @@ def reference_codes(voice: str):
     ref_text = txt_path.read_text(encoding="utf-8").strip()
     if not ref_text:
         raise ValueError(f"Reference transcript is empty: {txt_path}")
-    return tts.encode_reference(str(wav_path)), ref_text
+    codes = tts.encode_reference(str(wav_path))
+    return fit_reference_to_context(codes, ref_text), ref_text
 
 
 def prompt_token_count(text: str, ref_codes, ref_text: str) -> int:
-    """Count the exact GGUF prompt tokens NeuTTS will send to llama.cpp."""
     prompt = tts._ggml_prompt(ref_codes, ref_text, text)
     return len(tts.backbone.tokenize(prompt.encode("utf-8"), add_bos=True))
 
 
-def split_text_for_context(text: str, ref_codes, ref_text: str):
-    """Split using the model tokenizer, not character count.
+def fit_reference_to_context(ref_codes, ref_text: str):
+    """Ensure the reference itself leaves usable context for new text.
 
-    NeuTTS Air has a 2048-token context window INCLUDING reference text and
-    reference speech codes. A character limit cannot guarantee safety because
-    phonemization/tokenization varies substantially. We therefore binary-search
-    the largest word-aligned chunk whose *actual NeuTTS prompt* fits below a
-    conservative token budget.
+    NeuTTS Air's 2048-token window includes the reference audio codes and
+    reference transcript. A long reference can therefore overflow the model
+    before the requested announcement is even added. We progressively shorten
+    the reference codes until an empty synthesis prompt is safely below the
+    configured prompt budget.
     """
+    codes = list(ref_codes)
+    if not codes:
+        raise ValueError("NeuTTS reference audio produced no codec codes")
+
+    # The reference audio is used only as a speaker/style prompt. Keeping the
+    # beginning of a clean reference is preferable to allowing it to consume
+    # the entire context window. The model documentation recommends only a few
+    # seconds for cloning, so this also protects against accidentally supplied
+    # long recordings.
+    original = len(codes)
+    while codes and prompt_token_count("", codes, ref_text) > PROMPT_BUDGET:
+        new_len = max(1, int(len(codes) * 0.75))
+        if new_len == len(codes):
+            new_len -= 1
+        codes = codes[:new_len]
+
+    if not codes or prompt_token_count("", codes, ref_text) > PROMPT_BUDGET:
+        raise ValueError(
+            "NeuTTS reference is too large for the 2048-token context window. "
+            "Use a shorter reference WAV (about 3 seconds) and matching transcript."
+        )
+
+    if len(codes) != original:
+        print(
+            f"[NeuTTS] Trimmed reference codec prompt from {original} to {len(codes)} codes "
+            f"to fit context (empty prompt={prompt_token_count('', codes, ref_text)} tokens)",
+            flush=True,
+        )
+    else:
+        print(
+            f"[NeuTTS] Reference prompt={prompt_token_count('', codes, ref_text)} tokens",
+            flush=True,
+        )
+    return codes
+
+
+def split_text_for_context(text: str, ref_codes, ref_text: str):
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
 
-    # Keep substantial room for speech generation. This is deliberately
-    # conservative; it trades a few extra chunks for reliability.
-    budget = max(256, MAX_CONTEXT_TOKENS - PROMPT_TOKEN_HEADROOM)
     words = text.split()
     chunks = []
-    current = []
 
     def fits(candidate: str) -> bool:
-        return prompt_token_count(candidate, ref_codes, ref_text) <= budget
+        return prompt_token_count(candidate, ref_codes, ref_text) <= PROMPT_BUDGET
 
+    current = []
     for word in words:
         candidate = " ".join(current + [word])
-        if not current:
-            # An individual pathological token still has to be sent somehow.
-            if fits(candidate):
-                current = [word]
-            else:
-                # Fall back to progressively smaller pieces of the word.
-                for size in range(max(1, len(word) // 2), 0, -1):
-                    piece = word[:size]
-                    if fits(piece):
-                        chunks.append(piece)
-                        remainder = word[size:]
-                        current = [remainder] if remainder else []
-                        break
-                else:
-                    raise ValueError("NeuTTS reference prompt leaves no usable context for synthesis text")
-            continue
-
-        if fits(candidate):
-            current.append(word)
-        else:
+        if current and not fits(candidate):
             chunks.append(" ".join(current))
             current = [word]
+        elif fits(candidate):
+            current.append(word)
+        else:
+            # A single word can occasionally be pathological after phonemization.
+            # Split it into smaller pieces rather than sending an oversized prompt.
+            placed = False
+            for size in range(max(1, len(word) // 2), 0, -1):
+                piece = word[:size]
+                if fits(piece):
+                    chunks.append(piece)
+                    remainder = word[size:]
+                    current = [remainder] if remainder else []
+                    placed = True
+                    break
+            if not placed:
+                raise ValueError("Announcement text cannot fit in NeuTTS context")
 
     if current:
         chunks.append(" ".join(current))
-
-    # Prefer sentence boundaries when possible by merging adjacent small
-    # chunks only when the exact tokenizer budget still allows it.
-    merged = []
-    for chunk in chunks:
-        if merged:
-            candidate = f"{merged[-1]} {chunk}"
-            if fits(candidate):
-                merged[-1] = candidate
-                continue
-        merged.append(chunk)
-    return merged
+    return chunks
 
 
 def synthesize_chunks(text, ref_codes, ref_text):
     chunks = split_text_for_context(text, ref_codes, ref_text)
     print(
-        f"[NeuTTS] Exact-token chunking: {len(chunks)} chunk(s), "
-        f"budget={MAX_CONTEXT_TOKENS - PROMPT_TOKEN_HEADROOM} tokens",
+        f"[NeuTTS] Exact-token chunking: {len(chunks)} chunk(s), prompt budget={PROMPT_BUDGET}",
         flush=True,
     )
     audio_chunks = []
     for index, chunk in enumerate(chunks, 1):
         tokens = prompt_token_count(chunk, ref_codes, ref_text)
-        print(f"[NeuTTS] Chunk {index}/{len(chunks)}: {len(chunk)} chars, {tokens} prompt tokens", flush=True)
-        # This assertion prevents the old failure from reaching llama.cpp.
+        print(
+            f"[NeuTTS] Chunk {index}/{len(chunks)}: {len(chunk)} chars, {tokens} prompt tokens",
+            flush=True,
+        )
         if tokens >= MAX_CONTEXT_TOKENS:
-            raise ValueError(
-                f"Internal context-budget error: chunk has {tokens} prompt tokens "
-                f"but maximum is {MAX_CONTEXT_TOKENS}"
+            raise ValueError(f"Prompt is {tokens} tokens; maximum is {MAX_CONTEXT_TOKENS}")
+
+        try:
+            audio_chunks.append(np.asarray(tts.infer(chunk, ref_codes, ref_text), dtype=np.float32))
+        except Exception as exc:
+            message = str(exc)
+            match = re.search(r"Requested tokens \((\d+)\) exceed context window of (\d+)", message)
+            if not match:
+                raise
+
+            requested = int(match.group(1))
+            limit = int(match.group(2))
+            print(
+                f"[NeuTTS] llama.cpp rejected prompt ({requested}>{limit}); retrying with a shorter chunk",
+                flush=True,
             )
-        audio_chunks.append(np.asarray(tts.infer(chunk, ref_codes, ref_text), dtype=np.float32))
+
+            # This is a final safety net for tokenizer-version differences. If
+            # the preflight count disagrees with llama.cpp, split the text in
+            # half and retry each half with the same reference.
+            if len(chunk.split()) <= 1:
+                raise ValueError(
+                    f"NeuTTS reference/text prompt is too large ({requested} tokens). "
+                    "Use a shorter reference WAV."
+                ) from exc
+
+            parts = chunk.split()
+            midpoint = max(1, len(parts) // 2)
+            left = " ".join(parts[:midpoint])
+            right = " ".join(parts[midpoint:])
+            for retry in (left, right):
+                audio_chunks.append(
+                    np.asarray(tts.infer(retry, ref_codes, ref_text), dtype=np.float32)
+                )
+
     return audio_chunks, len(chunks)
 
 
@@ -168,8 +216,8 @@ def health():
         "backbone": BACKBONE,
         "language": LANGUAGE,
         "contextTokens": MAX_CONTEXT_TOKENS,
-        "promptTokenHeadroom": PROMPT_TOKEN_HEADROOM,
-        "build": "exact-token-chunking-v2",
+        "promptBudget": PROMPT_BUDGET,
+        "build": "reference-aware-context-v3",
     }
 
 
