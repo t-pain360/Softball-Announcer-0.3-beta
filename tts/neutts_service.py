@@ -69,7 +69,9 @@ def reference_codes(voice: str):
     ref_text = txt_path.read_text(encoding="utf-8").strip()
     if not ref_text:
         raise ValueError(f"Reference transcript is empty: {txt_path}")
+    print(f"[NeuTTS][trace] encoding reference voice={voice!r} wav={wav_path} transcript_chars={len(ref_text)}", flush=True)
     codes = tts.encode_reference(str(wav_path))
+    print(f"[NeuTTS][trace] reference encoded type={type(codes).__name__} length={len(codes) if hasattr(codes, '__len__') else 'n/a'}", flush=True)
     return codes, ref_text
 
 
@@ -166,6 +168,7 @@ def infer_with_context_budget(chunk, ref_codes, ref_text):
     )
 
     tts.backbone.reset()
+    print(f"[NeuTTS][trace] llama.cpp generation start chunk_chars={len(chunk)}", flush=True)
     output = tts.backbone(
         prompt,
         max_tokens=remaining,
@@ -174,11 +177,13 @@ def infer_with_context_budget(chunk, ref_codes, ref_text):
         stop=["<|SPEECH_GENERATION_END|>"],
         seed=tts._call_seed(),
     )
+    print(f"[NeuTTS][trace] llama.cpp generation returned type={type(output).__name__}", flush=True)
 
     if not isinstance(output, dict):
         raise RuntimeError(f"llama.cpp returned unexpected type: {type(output).__name__}")
 
     choices = output.get("choices")
+    print(f"[NeuTTS][trace] llama choices type={type(choices).__name__} length={len(choices) if hasattr(choices, '__len__') else 'n/a'} keys={list(output.keys())}", flush=True)
     if not isinstance(choices, list) or len(choices) == 0:
         raise RuntimeError(
             f"llama.cpp returned no choices for a {prompt_tokens}-token prompt "
@@ -190,18 +195,21 @@ def infer_with_context_budget(chunk, ref_codes, ref_text):
         raise RuntimeError(f"llama.cpp returned an invalid first choice: {type(first_choice).__name__}")
 
     output_str = first_choice.get("text", "")
+    print(f"[NeuTTS][trace] generated text chars={len(output_str) if isinstance(output_str, str) else 'n/a'} prefix={output_str[:160]!r if isinstance(output_str, str) else output_str!r}", flush=True)
     if not isinstance(output_str, str) or not output_str:
         raise RuntimeError("llama.cpp returned an empty speech-token response")
 
-    # Match exactly the token format used by NeuTTS upstream.
     speech_token_count = len(re.findall(r"<\|speech_(\d+)\|>", output_str))
+    print(f"[NeuTTS][trace] parsed speech tokens={speech_token_count}", flush=True)
     if speech_token_count == 0:
         raise RuntimeError(
             "NeuTTS generated no valid speech tokens. "
             f"Model output prefix: {output_str[:200]!r}"
         )
 
+    print("[NeuTTS][trace] decode start", flush=True)
     wav = tts._decode(output_str)
+    print(f"[NeuTTS][trace] decode returned type={type(wav).__name__} shape={getattr(wav, 'shape', None)}", flush=True)
     if tts.watermarker is not None:
         wav = tts.watermarker.apply_watermark(wav, sample_rate=24000)
     return np.asarray(wav, dtype=np.float32)
@@ -251,7 +259,7 @@ def health():
         "language": LANGUAGE,
         "contextTokens": MAX_CONTEXT_TOKENS,
         "minimumGenerationTokens": MIN_GENERATION_TOKENS,
-        "build": "direct-llama-context-budget-v7-regex-trace",
+        "build": "direct-llama-context-budget-v8-trace-stages",
     }
 
 
@@ -260,15 +268,22 @@ def synthesize(request: SynthesisRequest):
     text = request.text.strip()
     if not text:
         return {"error": "text is required"}
+    stage = "start"
     try:
+        stage = "reference_codes"
         ref_codes, ref_text = reference_codes(request.voice)
+        stage = "fit_reference_to_context"
         ref_codes = fit_reference_to_context(ref_codes, ref_text)
+        stage = "synthesize_chunks"
         audio_chunks, chunk_count = synthesize_chunks(text, ref_codes, ref_text)
         if not audio_chunks:
             raise ValueError("NeuTTS produced no audio chunks")
+        stage = "concatenate_audio"
         wav = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
         output = Path("/tmp") / f"softball-neutts-{os.getpid()}.wav"
+        stage = "write_wav"
         sf.write(output, wav, 24000)
+        stage = "read_wav_base64"
         audio = base64.b64encode(output.read_bytes()).decode("ascii")
         output.unlink(missing_ok=True)
         return {
@@ -279,9 +294,15 @@ def synthesize(request: SynthesisRequest):
             "engine": "neutts-air",
         }
     except Exception as exc:
-        print(f"[NeuTTS] synthesis error: {exc}", flush=True)
-        traceback.print_exc()
-        return {"error": f"{type(exc).__name__}: {exc}", "engine": "neutts-air"}
+        tb = traceback.format_exc()
+        print(f"[NeuTTS] synthesis error stage={stage}: {exc}", flush=True)
+        print(tb, flush=True)
+        return {
+            "error": f"{type(exc).__name__}: {exc}",
+            "engine": "neutts-air",
+            "stage": stage,
+            "traceback": tb,
+        }
 
 
 if __name__ == "__main__":
