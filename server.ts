@@ -32,15 +32,22 @@ let neuttsStart: Promise<void> | null = null;
 
 const cacheKey = (p: Player, v: Persona) => JSON.stringify([p.id ?? '', p.name, p.number, p.nickname ?? '', p.lore ?? '', v.id]);
 
+function limitText(text: unknown, maxChars = 700) {
+  const clean = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxChars) return clean;
+  const clipped = clean.slice(0, maxChars);
+  const boundary = Math.max(clipped.lastIndexOf('.'), clipped.lastIndexOf('!'), clipped.lastIndexOf('?'));
+  return (boundary >= Math.floor(maxChars * 0.55) ? clipped.slice(0, boundary + 1) : clipped).trim();
+}
+
 function fallbackScript(p: Player, v: Persona) {
-  const lore = String(p.lore ?? '').trim();
-  const nickname = p.nickname?.trim() ? `, ${p.nickname.trim()}` : '';
-  const cue = lore ? ` ${lore}.` : '';
+  const lore = limitText(p.lore, 180);
+  const nickname = p.nickname?.trim() ? `, ${limitText(p.nickname, 80)}` : '';
   switch (v.id) {
-    case 'hype': return `BALLPARK, MAKE SOME NOISE! Number ${p.number}, ${p.name}${nickname}!${lore ? ` ${lore}!` : ''} Let's go!`;
-    case 'radio': return `Now stepping to the plate, number ${p.number}, ${p.name}${nickname}.${cue}`;
-    case 'velvet': return `Ladies and gentlemen, please welcome number ${p.number}, ${p.name}${nickname}.${cue}`;
-    default: return `Your attention please... Now batting... number ${p.number}, ${p.name}${nickname}.${cue}`;
+    case 'hype': return limitText(`BALLPARK, MAKE SOME NOISE! Number ${p.number}, ${p.name}${nickname}!${lore ? ` ${lore}!` : ''} Let's go!`);
+    case 'radio': return limitText(`Now stepping to the plate, number ${p.number}, ${p.name}${nickname}.${lore ? ` ${lore}.` : ''}`);
+    case 'velvet': return limitText(`Ladies and gentlemen, please welcome number ${p.number}, ${p.name}${nickname}.${lore ? ` ${lore}.` : ''}`);
+    default: return limitText(`Your attention please... Now batting... number ${p.number}, ${p.name}${nickname}.${lore ? ` ${lore}.` : ''}`);
   }
 }
 
@@ -74,7 +81,7 @@ async function startNeutts() {
 async function synthesize(text: string, persona: Persona) {
   try {
     await startNeutts();
-    const response = await fetch(`${NEUTTS_URL}/synthesize`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, voice: persona.voice }), signal: AbortSignal.timeout(NEUTTS_TIMEOUT_MS) });
+    const response = await fetch(`${NEUTTS_URL}/synthesize`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: limitText(text), voice: persona.voice }), signal: AbortSignal.timeout(NEUTTS_TIMEOUT_MS) });
     const data = await response.json() as { audioBase64?: string; voice?: string; error?: string };
     if (!response.ok || !data.audioBase64) throw new Error(data.error || `NeuTTS returned HTTP ${response.status}`);
     return { audioBase64: data.audioBase64, audioType: 'neutts_wav' as const, voice: data.voice ?? persona.voice };
@@ -107,7 +114,8 @@ app.post('/api/announce', async (req, res) => {
     if (!player?.name || !Number.isFinite(Number(player.number))) return res.status(400).json({ error: 'Player name and jersey number are required.' });
     const persona = personas[personaId as keyof typeof personas];
     if (!persona) return res.status(400).json({ error: 'Invalid persona.' });
-    return res.json(await announcePlayer({ ...player, number: Number(player.number) }, persona, Boolean(generateAudio)));
+    const safePlayer = { ...player, name: limitText(player.name, 100), nickname: limitText(player.nickname, 80), lore: limitText(player.lore, 180), number: Number(player.number) };
+    return res.json(await announcePlayer(safePlayer, persona, Boolean(generateAudio)));
   } catch (error) { return res.status(500).json({ error: error instanceof Error ? error.message : 'Announcement failed.' }); }
 });
 
@@ -116,7 +124,7 @@ app.post('/api/precache', async (req, res) => {
   const persona = personas[(req.body?.personaId || 'classic') as keyof typeof personas];
   if (!persona) return res.status(400).json({ error: 'Invalid persona.' });
   let completed = 0;
-  for (const player of players) { try { await announcePlayer(player, persona, true); completed++; } catch (error) { console.error('Precache failed:', error); } }
+  for (const player of players) { try { await announcePlayer({ ...player, name: limitText(player.name, 100), nickname: limitText(player.nickname, 80), lore: limitText(player.lore, 180) }, persona, true); completed++; } catch (error) { console.error('Precache failed:', error); } }
   return res.json({ completed, total: players.length, complete: completed === players.length });
 });
 
@@ -129,14 +137,10 @@ async function startServer() {
     return;
   }
 
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa',
-  });
+  const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
   app.use(vite.middlewares);
   app.listen(port, () => console.log(`Softball Announcer Local Version dev server listening on http://localhost:${port}`));
 }
 
 if (process.env.NODE_ENV !== 'test') void startServer();
-
 export default app;
