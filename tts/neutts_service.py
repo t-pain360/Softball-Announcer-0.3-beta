@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+import traceback
 from pathlib import Path
 from functools import lru_cache
 
@@ -164,9 +165,6 @@ def infer_with_context_budget(chunk, ref_codes, ref_text):
         flush=True,
     )
 
-    # NeuTTS itself resets llama.cpp before every non-streaming inference.
-    # Without this, repeated /synthesize requests can inherit stale KV-cache state
-    # and produce empty output (which upstream code then indexes as choices[0]).
     tts.backbone.reset()
     output = tts.backbone(
         prompt,
@@ -177,22 +175,31 @@ def infer_with_context_budget(chunk, ref_codes, ref_text):
         seed=tts._call_seed(),
     )
 
-    choices = output.get("choices") if isinstance(output, dict) else None
-    if not choices:
+    if not isinstance(output, dict):
+        raise RuntimeError(f"llama.cpp returned unexpected type: {type(output).__name__}")
+
+    choices = output.get("choices")
+    if not isinstance(choices, list) or len(choices) == 0:
         raise RuntimeError(
             f"llama.cpp returned no choices for a {prompt_tokens}-token prompt "
-            f"with max_tokens={remaining}. Raw response keys: "
-            f"{list(output.keys()) if isinstance(output, dict) else type(output).__name__}"
+            f"with max_tokens={remaining}. Raw response keys: {list(output.keys())}"
         )
 
-    output_str = choices[0].get("text", "")
-    if not output_str:
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise RuntimeError(f"llama.cpp returned an invalid first choice: {type(first_choice).__name__}")
+
+    output_str = first_choice.get("text", "")
+    if not isinstance(output_str, str) or not output_str:
         raise RuntimeError("llama.cpp returned an empty speech-token response")
 
-    # NeuTTS upstream raises a useful error when no speech tokens are present.
-    speech_token_count = len(re.findall(r"<\\|speech_(\\d+)\\|>", output_str))
+    # Match exactly the token format used by NeuTTS upstream.
+    speech_token_count = len(re.findall(r"<\|speech_(\d+)\|>", output_str))
     if speech_token_count == 0:
-        raise RuntimeError("NeuTTS generated no valid speech tokens")
+        raise RuntimeError(
+            "NeuTTS generated no valid speech tokens. "
+            f"Model output prefix: {output_str[:200]!r}"
+        )
 
     wav = tts._decode(output_str)
     if tts.watermarker is not None:
@@ -244,7 +251,7 @@ def health():
         "language": LANGUAGE,
         "contextTokens": MAX_CONTEXT_TOKENS,
         "minimumGenerationTokens": MIN_GENERATION_TOKENS,
-        "build": "direct-llama-context-budget-v6-reset-guard",
+        "build": "direct-llama-context-budget-v7-regex-trace",
     }
 
 
@@ -273,7 +280,8 @@ def synthesize(request: SynthesisRequest):
         }
     except Exception as exc:
         print(f"[NeuTTS] synthesis error: {exc}", flush=True)
-        return {"error": str(exc), "engine": "neutts-air"}
+        traceback.print_exc()
+        return {"error": f"{type(exc).__name__}: {exc}", "engine": "neutts-air"}
 
 
 if __name__ == "__main__":
